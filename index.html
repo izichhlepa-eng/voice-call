@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Voice Call</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  body { font-family: sans-serif; max-width: 500px; margin: 40px auto; padding: 0 20px; }
+  input, button { padding: 8px; font-size: 16px; margin: 4px 0; }
+  #status { padding: 12px; background: #f0f0f0; border-radius: 6px; }
+  .ok { background: #d4edda !important; }
+  .err { background: #f8d7da !important; }
+</style>
+</head>
+<body>
+<h2>Простой голосовой звонок</h2>
+
+<input id="room" placeholder="Имя комнаты" value="test">
+<button onclick="startCall()">Подключиться</button>
+<p id="status">Не подключено</p>
+<audio id="remoteAudio" autoplay></audio>
+
+<script>
+const socket = io();
+let pc, localStream, room;
+const statusEl = document.getElementById("status");
+
+function setStatus(text, cls = "") {
+  statusEl.textContent = text;
+  statusEl.className = cls;
+}
+
+async function startCall() {
+  room = document.getElementById("room").value.trim();
+  if (!room) { setStatus("Введите имя комнаты", "err"); return; }
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    setStatus("Не удалось получить доступ к микрофону: " + e.message, "err");
+    return;
+  }
+
+  socket.emit("join", { room });
+  setStatus("Ожидание собеседника...");
+}
+
+socket.on("ready", async ({ initiator }) => {
+  createPeerConnection();
+  if (initiator) {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit("signal", { room, payload: { type: "offer", sdp: offer } });
+  }
+  setStatus("Соединение...");
+});
+
+function createPeerConnection() {
+  pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" }
+    ]
+  });
+
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+  pc.ontrack = (e) => {
+    document.getElementById("remoteAudio").srcObject = e.streams[0];
+    setStatus("✅ В звонке", "ok");
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate)
+      socket.emit("signal", { room, payload: { type: "candidate", candidate: e.candidate } });
+  };
+
+  pc.onconnectionstatechange = () => {
+    setStatus("Состояние: " + pc.connectionState);
+    if (pc.connectionState === "failed") {
+      setStatus("Соединение не установлено. Скорее всего нужен TURN-сервер (см. этап 9).", "err");
+    }
+  };
+}
+
+socket.on("signal", async (payload) => {
+  if (!pc) return;
+  try {
+    if (payload.type === "offer") {
+      await pc.setRemoteDescription(payload.sdp);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit("signal", { room, payload: { type: "answer", sdp: answer } });
+    } else if (payload.type === "answer") {
+      await pc.setRemoteDescription(payload.sdp);
+    } else if (payload.type === "candidate") {
+      await pc.addIceCandidate(payload.candidate);
+    }
+  } catch (e) { console.error("Ошибка signal:", e); }
+});
+
+socket.on("peer-left", () => {
+  setStatus("Собеседник вышел");
+  if (pc) pc.close();
+  pc = null;
+});
+
+socket.on("full", () => setStatus("Комната заполнена (уже 2 участника)", "err"));
+</script>
+</body>
+</html>
